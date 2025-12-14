@@ -241,6 +241,16 @@ export function Autocomplete(props: {
           onSelect: () => command.trigger("session.compact"),
         },
         {
+          display: "/debug-compaction",
+          description: "show compaction summary and handoff",
+          onSelect: () => command.trigger("session.debug-compaction"),
+        },
+        {
+          display: "/update-memory",
+          description: "prompt model to update .agent-files/",
+          onSelect: () => command.trigger("session.update-memory"),
+        },
+        {
           display: "/unshare",
           disabled: !s.share,
           description: "unshare a session",

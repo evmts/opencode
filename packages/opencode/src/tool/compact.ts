@@ -4,25 +4,22 @@ import { SessionCompaction } from "../session/compaction"
 import { Session } from "../session"
 
 export const CompactTool = Tool.define("compact", {
-  description: `Trigger context compaction to free up context window space. Compaction summarizes the conversation, clears history, and continues seamlessly - the user sees no interruption but you get fresh context.
+  description: `Trigger context compaction to summarize conversation and free context space. You'll get a fresh context with a summary - the user sees no interruption.
 
-BE AGGRESSIVE with compaction - use it early and often. After 3-5 turns, if ANY of the following apply, compact immediately:
+WHEN TO COMPACT (based on quality signals you can sense):
+- You're going in circles or repeating failed approaches
+- You're confused about what's current vs outdated
+- Context feels noisy - old exploration, irrelevant tangents, superseded information
+- You've completed a major phase and want a clean slate for something different
 
-Use this tool when:
-1. Exploration phase complete (read files, searched code, gathered context) - compact before implementation
-2. Implementation done - compact before testing/verification
-3. Any tool output over 100 lines that you've already processed
-4. Failed attempts or errors you've already learned from
-5. Phase transition (design to implementation or vice versa)
-6. Going in circles (repeating attempts, stuck in debug loop)
-7. Large file contents, search results, or command outputs polluting context
+WHEN NOT TO COMPACT:
+- Just because context is large - most providers cache context, making large conversations cheaper than you'd expect
+- Mid-task or mid-debugging - you'll lose important details
+- You're making good progress - don't interrupt flow
 
-Do NOT compact when:
-1. Mid-edit or mid-tool use (finish the edit or tool use first)
-2. Unresolved error you're actively debugging
-3. Under 3 turns in the conversation
+TRADEOFF: Compaction loses detail but gains clarity. Use the <context-status> utilization % the system provides, combined with your sense of context quality, to decide.
 
-Principle: Context is precious. Compact aggressively once information is processed - but ensure the summary captures all details needed to continue (error messages, file paths, code patterns, what worked/didn't work).`,
+When compacting, ensure the summary captures all details needed to continue: error messages, file paths, key decisions, what worked/didn't work, and current task state.`,
   parameters: z.object({
     reason: z.string().describe("Why compaction would help at this point"),
   }),

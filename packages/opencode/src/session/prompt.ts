@@ -446,9 +446,12 @@ export namespace SessionPrompt {
       const agent = await Agent.get(lastUser.agent)
       const maxSteps = agent.maxSteps ?? Infinity
       const isLastStep = step >= maxSteps
-      msgs = insertReminders({
+      msgs = await insertReminders({
         messages: msgs,
         agent,
+        lastFinished,
+        model,
+        sessionID,
       })
       const processor = SessionProcessor.create({
         assistantMessage: (await Session.updateMessage({
@@ -654,7 +657,8 @@ export namespace SessionPrompt {
       if (result === "stop") break
       continue
     }
-    SessionCompaction.prune({ sessionID })
+    // Pruning disabled - model has better semantic understanding of what's important
+    // SessionCompaction.prune({ sessionID })
     for await (const item of MessageV2.stream(sessionID)) {
       if (item.info.role === "user") continue
       const queued = state()[sessionID]?.callbacks ?? []
@@ -1132,9 +1136,160 @@ export namespace SessionPrompt {
     }
   }
 
-  function insertReminders(input: { messages: MessageV2.WithParts[]; agent: Agent.Info }) {
+  function getCompactionNudge(utilization: number): string {
+    if (utilization >= 0.8) {
+      return "\n\nCRITICAL: Context at 80%. Stop and compact."
+    }
+    if (utilization >= 0.7) {
+      return "\n\nWARNING: Context at 70%. Compact soon."
+    }
+    if (utilization >= 0.6) {
+      return "\n\nContext at 60%. Compact now if you've completed a task phase."
+    }
+    if (utilization >= 0.5) {
+      return "\n\nContext at 50%. Good time to compact at next breakpoint."
+    }
+    if (utilization >= 0.4) {
+      return "\n\nContext at 40%. Consider compacting if finished a unit of work."
+    }
+    if (utilization >= 0.3) {
+      return "\n\nContext at 30%. Compaction is cheap - consider it at breakpoints."
+    }
+    if (utilization >= 0.2) {
+      return "\n\nContext at 20%. Compaction is cheap with caching."
+    }
+    return ""
+  }
+
+  function getAgentFilesNudge(utilization: number): string {
+    if (utilization >= 0.8) {
+      return "<system-reminder>Update .agent-files/ NOW before compacting.</system-reminder>"
+    }
+    if (utilization >= 0.7) {
+      return "<system-reminder>Update .agent-files/ before compacting.</system-reminder>"
+    }
+    if (utilization >= 0.4) {
+      return "<system-reminder>Keep .agent-files/ updated if state has changed.</system-reminder>"
+    }
+    if (utilization >= 0.2) {
+      return "<system-reminder>Keep .agent-files/ updated as you work.</system-reminder>"
+    }
+    return ""
+  }
+
+  function getSelfCheckNudge(percent: number): string {
+    // Trigger self-check at 20%, 30%, 40%, 50%, 60%, 70%, 80%, 90%
+    if (percent >= 20 && percent % 10 < 3) {
+      return "<self-check>Pause: What are your core instructions? If you can't clearly recall them, compact now.</self-check>"
+    }
+    return ""
+  }
+
+  async function getMemoryFileReminder(sessionID: string, messageCount: number): Promise<string | null> {
+    // Only remind in early part of session (first 10 messages) to avoid spam
+    if (messageCount > 10) return null
+
+    const agentFilesDir = `${Instance.directory}/.agent-files`
+    const memoryFiles = ["STATUS.md", "LONGTERM_MEM.md", "MEDIUMTERM_MEM.md"]
+
+    // Check if .agent-files/ directory exists
+    const stat = await fs.stat(agentFilesDir).catch(() => null)
+    if (!stat?.isDirectory()) return null
+
+    // Get files that exist but haven't been read this session
+    const unreadFiles: string[] = []
+    for (const file of memoryFiles) {
+      const filepath = `${agentFilesDir}/${file}`
+      const exists = await Bun.file(filepath)
+        .exists()
+        .catch(() => false)
+      if (exists) {
+        const readTime = FileTime.get(sessionID, filepath)
+        if (!readTime) {
+          unreadFiles.push(file)
+        }
+      }
+    }
+
+    if (unreadFiles.length === 0) return null
+
+    return `<system-reminder>Unread memory files: ${unreadFiles.join(", ")} - read these to restore prior session context.</system-reminder>`
+  }
+
+  async function insertReminders(input: {
+    messages: MessageV2.WithParts[]
+    agent: Agent.Info
+    lastFinished?: MessageV2.Assistant
+    model: Provider.Model
+    sessionID: string
+  }) {
     const userMessage = input.messages.findLast((msg) => msg.info.role === "user")
     if (!userMessage) return input.messages
+
+    // Add context utilization status when > 15%
+    if (input.lastFinished && input.model.limit.context > 0) {
+      const tokens = input.lastFinished.tokens
+      const used = tokens.input + tokens.cache.read + tokens.cache.write + tokens.output
+      const capacity = input.model.limit.context
+      const utilization = used / capacity
+
+      if (utilization > 0.15) {
+        const percent = Math.round(utilization * 100)
+        const usedK = Math.round(used / 1000)
+        const capacityK = Math.round(capacity / 1000)
+
+        // Context status with compaction nudge
+        const compactionNudge = getCompactionNudge(utilization)
+        userMessage.parts.push({
+          id: Identifier.ascending("part"),
+          messageID: userMessage.info.id,
+          sessionID: userMessage.info.sessionID,
+          type: "text",
+          text: `<context-status>${percent}% of context window used (${usedK}k/${capacityK}k tokens)${compactionNudge}</context-status>`,
+          synthetic: true,
+        })
+
+        // Agent files nudge (separate part)
+        const agentFilesNudge = getAgentFilesNudge(utilization)
+        if (agentFilesNudge) {
+          userMessage.parts.push({
+            id: Identifier.ascending("part"),
+            messageID: userMessage.info.id,
+            sessionID: userMessage.info.sessionID,
+            type: "text",
+            text: agentFilesNudge,
+            synthetic: true,
+          })
+        }
+
+        // Self-check nudge (separate part)
+        const selfCheckNudge = getSelfCheckNudge(percent)
+        if (selfCheckNudge) {
+          userMessage.parts.push({
+            id: Identifier.ascending("part"),
+            messageID: userMessage.info.id,
+            sessionID: userMessage.info.sessionID,
+            type: "text",
+            text: selfCheckNudge,
+            synthetic: true,
+          })
+        }
+      }
+    }
+
+    // Check for unread memory files (only on first few messages to avoid spam)
+    const memoryReminder = await getMemoryFileReminder(input.sessionID, input.messages.length)
+    if (memoryReminder) {
+      userMessage.parts.push({
+        id: Identifier.ascending("part"),
+        messageID: userMessage.info.id,
+        sessionID: userMessage.info.sessionID,
+        type: "text",
+        text: memoryReminder,
+        synthetic: true,
+      })
+    }
+
     if (input.agent.name === "plan") {
       userMessage.parts.push({
         id: Identifier.ascending("part"),

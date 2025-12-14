@@ -319,6 +319,49 @@ export function Session() {
       },
     },
     {
+      title: "Debug compaction",
+      value: "session.debug-compaction",
+      category: "Session",
+      onSelect: async (dialog) => {
+        const s = session()
+        const sessionMessages = messages()
+
+        // Find compaction summary message (assistant message with summary: true)
+        const summaryMsg = sessionMessages.find((m) => m.role === "assistant" && (m as AssistantMessage).summary) as
+          | AssistantMessage
+          | undefined
+
+        let output = "# Compaction Debug\n\n"
+
+        // Handoff prompt
+        if (s.handoff) {
+          output += `## Handoff Prompt\n\n`
+          output += `**Trigger:** ${s.handoff.trigger}\n`
+          output += `**Created:** ${new Date(s.handoff.createdAt).toLocaleString()}\n\n`
+          output += `\`\`\`\n${s.handoff.prompt}\n\`\`\`\n\n`
+        } else {
+          output += `## Handoff Prompt\n\nNo handoff stored.\n\n`
+        }
+
+        // Summary message content
+        if (summaryMsg) {
+          const parts = sync.data.part[summaryMsg.id] ?? []
+          const textParts = parts.filter((p): p is TextPart => p.type === "text")
+          output += `## Summary Message\n\n`
+          output += `**Message ID:** ${summaryMsg.id}\n\n`
+          for (const part of textParts) {
+            output += `${part.text}\n\n`
+          }
+        } else {
+          output += `## Summary Message\n\nNo compaction summary found.\n\n`
+        }
+
+        await Clipboard.copy(output)
+        toast.show({ message: "Compaction debug info copied to clipboard!", variant: "success" })
+        dialog.clear()
+      },
+    },
+    {
       title: "Unshare session",
       value: "session.unshare",
       keybind: "session_unshare",
@@ -329,6 +372,20 @@ export function Session() {
           sessionID: route.sessionID,
         })
         dialog.clear()
+      },
+    },
+    {
+      title: "Update memory",
+      value: "session.update-memory",
+      category: "Session",
+      onSelect: (dialog) => {
+        prompt.set({
+          input:
+            "Update .agent-files/ now. Review what changed this session and update STATUS.md, any active TASK_*.md files, and MEDIUMTERM_MEM.md/LONGTERM_MEM.md if there are lasting learnings. Be thorough.",
+          parts: [],
+        })
+        dialog.clear()
+        command.trigger("prompt.submit")
       },
     },
     {
@@ -1098,7 +1155,9 @@ function UserMessage(props: {
           <box marginTop={1} border={["top"]} titleAlignment="center" borderColor={theme.borderActive}>
             <box flexDirection="row" gap={1} justifyContent="center" paddingTop={1} paddingBottom={1}>
               <spinner frames={spinnerFrames} interval={80} color={theme.borderActive} />
-              <text fg={theme.textMuted}>Auto-optimizing context...</text>
+              <text fg={theme.textMuted}>
+                {compaction()?.trigger === "overflow" ? "Auto-optimizing context..." : "Optimizing context..."}
+              </text>
             </box>
           </box>
         </Show>
